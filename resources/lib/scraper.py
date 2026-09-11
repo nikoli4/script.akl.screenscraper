@@ -131,7 +131,7 @@ class ScreenScraper(Scraper):
         constants.ASSET_CARTRIDGE_ID,
         constants.ASSET_MAP_ID,
         # ASSET_MANUAL_ID,
-        # ASSET_TRAILER_ID,
+        constants.ASSET_TRAILER_ID,
     ]
     # Unsupported AKL types:
     # manuel (Manual)
@@ -156,6 +156,7 @@ class ScreenScraper(Scraper):
         'box-3D'             : constants.ASSET_3DBOX_ID,
         'support-2D'         : constants.ASSET_CARTRIDGE_ID,
         'maps'               : constants.ASSET_MAP_ID,
+        'video'              : constants.ASSET_TRAILER_ID,
     }
 
     # List of country/region suffixes supported by ScreenScraper.
@@ -341,7 +342,24 @@ class ScreenScraper(Scraper):
         #logger.debug('ScreenScraper.get_candidates() romchecksums "{}"'.format(romchecksums_path))
         logger.debug('ScreenScraper.get_candidates() AKL platform "{}"'.format(platform))
         logger.debug('ScreenScraper.get_candidates() SS platform  "{}"'.format(scraper_platform))
-        candidate_list = self._search_candidates_jeuInfos(rom_FN, platform, scraper_platform, status_dic)
+        # Windows collections commonly use .lnk shortcuts rather than actual game files.
+        # Hashing the shortcut cannot identify the game in ScreenScraper, so use the
+        # name-search API for Microsoft Windows shortcuts and cache the top-ranked
+        # game's full metadata/media response. All other platforms/files retain the
+        # original checksum-based jeuInfos.php behaviour.
+        if platform == 'Microsoft Windows' and rom_FN.getBase().lower().endswith('.lnk'):
+            rombase_noext = rom_FN.getBase()[:-4]
+            # Preserve the user's AKL/shortcut title for display and sorting. The
+            # normalized ScreenScraper title is used only to identify the game.
+            self._windows_original_title = rombase_noext
+            logger.debug('ScreenScraper.get_candidates() Windows shortcut detected. Using name search "{}"'.format(rombase_noext))
+            candidate_list = self._search_windows_shortcut(search_term, rombase_noext, platform, scraper_platform, status_dic)
+        elif platform == 'Sony PlayStation 3' and self._is_ps3_eboot_path(rompath):
+            ps3_title = self._get_ps3_folder_title(rompath)
+            logger.debug('ScreenScraper.get_candidates() PS3 EBOOT detected. Using parent game-folder title "{}"'.format(ps3_title))
+            candidate_list = self._search_ps3_eboot(ps3_title, platform, scraper_platform, status_dic)
+        else:
+            candidate_list = self._search_candidates_jeuInfos(rom_FN, platform, scraper_platform, status_dic)
         
         # _search_candidates_jeuRecherche() does not work for get_metadata() and get_assets()
         # because jeu_dic is not introduced in the internal cache.
@@ -360,15 +378,20 @@ class ScreenScraper(Scraper):
             return self._new_gamedata_dic()
 
         # --- Retrieve jeu_dic from internal cache ---
-        if self._check_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key):
-            logger.debug('ScreenScraper.get_metadata() Internal cache hit "{}"'.format(self.cache_key))
-            jeu_dic = self._retrieve_from_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key)
-        else:
-            raise ValueError('Logic error')
+        if not self._check_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key):
+            if not self._ensure_selected_game_cached(status_dic):
+                return self._new_gamedata_dic()
+        logger.debug('ScreenScraper.get_metadata() Internal cache hit "{}"'.format(self.cache_key))
+        jeu_dic = self._retrieve_from_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key)
 
         # --- Parse game metadata ---
         gamedata = self._new_gamedata_dic()
-        gamedata['title']     = self._parse_meta_title(jeu_dic)
+        if hasattr(self, '_windows_original_title') and self._windows_original_title:
+            gamedata['title'] = self._windows_original_title
+            logger.debug('ScreenScraper.get_metadata() Preserving Windows shortcut title "{}"'.format(
+                self._windows_original_title))
+        else:
+            gamedata['title'] = self._parse_meta_title(jeu_dic)
         gamedata['year']      = self._parse_meta_year(jeu_dic)
         gamedata['genre']     = self._parse_meta_genre(jeu_dic)
         gamedata['developer'] = self._parse_meta_developer(jeu_dic)
@@ -390,11 +413,11 @@ class ScreenScraper(Scraper):
             asset_info_id, self.candidate['id']))
 
         # --- Retrieve jeu_dic from internal cache ---
-        if self._check_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key):
-            logger.debug('ScreenScraper.get_assets() Internal cache hit "{}"'.format(self.cache_key))
-            jeu_dic = self._retrieve_from_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key)
-        else:
-            raise ValueError('Logic error')
+        if not self._check_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key):
+            if not self._ensure_selected_game_cached(status_dic):
+                return []
+        logger.debug('ScreenScraper.get_assets() Internal cache hit "{}"'.format(self.cache_key))
+        jeu_dic = self._retrieve_from_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key)
 
         # --- Parse game assets ---
         all_asset_list = self._retrieve_all_assets(jeu_dic, status_dic)
@@ -529,7 +552,313 @@ class ScreenScraper(Scraper):
         if json_data is None or not status_dic['status']: return None
         self._dump_json_debug('ScreenScraper_gameSearch.json', json_data)
 
-    # Call to ScreenScraper jeuInfos.php.
+
+    def _is_ps3_eboot_path(self, rompath):
+        """True only for RPCS3 disc-folder EBOOT.BIN paths.
+
+        This intentionally does not catch arbitrary EBOOT.BIN files. The special
+        handling is limited to .../PS3_GAME/USRDIR/EBOOT.BIN on the PS3 platform.
+        """
+        normalized = str(rompath).replace('\\', '/').rstrip('/').lower()
+        return normalized.endswith('/ps3_game/usrdir/eboot.bin')
+
+    def _get_ps3_folder_title(self, rompath):
+        """Return the folder immediately above PS3_GAME as the PS3 game title."""
+        normalized = str(rompath).replace('\\', '/').rstrip('/')
+        parts = [part for part in normalized.split('/') if part]
+        if len(parts) >= 4 and parts[-3].lower() == 'ps3_game' and parts[-2].lower() == 'usrdir' and parts[-1].lower() == 'eboot.bin':
+            return parts[-4]
+        return 'EBOOT'
+
+    def _search_ps3_eboot(self, folder_title, platform, scraper_platform, status_dic):
+        """PS3 RPCS3 disc-folder lookup using the game folder name, not EBOOT.BIN.
+
+        EBOOT.BIN is only the executable inside a decrypted PS3 disc folder, so
+        hashing/naming it as the ROM does not identify the game on ScreenScraper.
+        This path is deliberately PS3-specific; all normal ROMs keep the original
+        checksum-based lookup unchanged.
+        """
+        import re as _re
+
+        variants = []
+
+        def _add_variant(value):
+            value = _re.sub(r'\s+', ' ', value).strip()
+            if value and value not in variants:
+                variants.append(value)
+
+        _add_variant(folder_title)
+        normalized = _re.sub(r'[_]+', ' ', folder_title)
+        _add_variant(normalized)
+        _add_variant(_re.sub(r'\s*-\s*', ' - ', normalized))
+        _add_variant(_re.sub(r'\s*-\s*', ' ', normalized))
+
+        # A common PS3 folder naming difference is Arabic vs Roman numerals
+        # (for example "God Of War 3" vs "God of War III"). Keep this as a
+        # fallback after the exact folder title so normal numbered titles win first.
+        roman_map = {
+            '2': 'II', '3': 'III', '4': 'IV', '5': 'V',
+            '6': 'VI', '7': 'VII', '8': 'VIII', '9': 'IX', '10': 'X'
+        }
+        match = _re.search(r'(?<!\d)(10|[2-9])$', normalized)
+        if match:
+            roman = roman_map.get(match.group(1))
+            if roman:
+                _add_variant(normalized[:match.start()] + roman)
+
+        logger.debug('ScreenScraper._search_ps3_eboot() PS3 folder-title lookup')
+        logger.debug('ScreenScraper._search_ps3_eboot() title variants {}'.format(variants))
+
+        for query_title in variants:
+            encoded = quote_plus(query_title)
+            logger.debug('ScreenScraper._search_ps3_eboot() jeuInfos attempt "system+romnom" title="{}"'.format(query_title))
+
+            url_tail = '&systemeid={}&romnom={}'.format(scraper_platform, encoded)
+            url = ScreenScraper.URL_jeuInfos + self._get_common_SS_URL() + url_tail
+            json_data = self._retrieve_URL_as_JSON(url, status_dic)
+
+            if not status_dic['status']:
+                # A 404 for one variant should not prevent later safe fallbacks.
+                status_dic['status'] = True
+                continue
+
+            if not isinstance(json_data, dict):
+                continue
+
+            response = json_data.get('response', {})
+            jeu_dic = response.get('jeu') if isinstance(response, dict) else None
+            if not isinstance(jeu_dic, dict):
+                continue
+
+            game_id = jeu_dic.get('id')
+            if not game_id:
+                continue
+
+            noms = jeu_dic.get('noms', [])
+            title = query_title
+            if isinstance(noms, list) and noms and isinstance(noms[0], dict):
+                title = noms[0].get('text') or title
+
+            logger.debug('ScreenScraper._search_ps3_eboot() matched id="{}" title="{}" from query="{}"'.format(
+                game_id, title, query_title))
+
+            # Match the cache contract used by the normal ScreenScraper path.
+            jeu_dic['roms'] = []
+            self._update_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key, jeu_dic)
+
+            candidate = self._new_candidate_dic()
+            candidate['id'] = str(game_id)
+            candidate['display_name'] = title
+            candidate['platform'] = platform
+            candidate['scraper_platform'] = scraper_platform
+            candidate['order'] = 1
+            return [candidate]
+
+        logger.debug('ScreenScraper._search_ps3_eboot() no PS3 folder-title variant matched')
+        return []
+
+    def _search_windows_shortcut(self, search_term, rombase_noext, platform, scraper_platform, status_dic):
+        """Resolve Windows .lnk games by title without hashing the shortcut.
+
+        Exact title is always tried first. If that fails, conservative variants are
+        generated for the naming patterns commonly used by PC collections: trailing
+        parenthetical labels, punctuation, a collection-order number between a
+        franchise prefix and game subtitle, and a missing leading article. If more
+        than one distinct ScreenScraper game is found, ask the user instead of
+        guessing. If no automatic variant matches, offer one manual title entry as
+        a last-resort fallback rather than silently skipping the game.
+        """
+        import re as _re
+
+        # AKL supplies search_term after applying its Automatic/Manual search-term
+        # setting. Respect it here; older Windows .lnk code accidentally ignored it.
+        requested_title = (search_term or rombase_noext or '').strip()
+
+        def _make_variants(title):
+            variants = []
+
+            def _add(value):
+                value = _re.sub(r'\s+', ' ', value or '').strip()
+                if value and value not in variants:
+                    variants.append(value)
+
+            _add(title)
+            normalized = _re.sub(r'[_]+', ' ', title)
+            _add(normalized)
+            _add(_re.sub(r'\s*-\s*', ' - ', normalized))
+            _add(_re.sub(r'\s*-\s*', ' ', normalized))
+
+            # Parenthetical text in this collection is often an edition/DLC/note,
+            # e.g. "... (The Path Home)". Keep the original first, then try without it.
+            no_paren = _re.sub(r'\s*\([^()]*\)\s*$', '', normalized).strip()
+            _add(no_paren)
+
+            # A missing leading article is common in filenames (Witcher -> The Witcher).
+            # This is only an additional lookup; it never renames the AKL ROM itself.
+            bases = list(variants)
+            for base in bases:
+                if base and not _re.match(r'(?i)^the\s+', base):
+                    _add('The ' + base)
+
+            # Collection-order pattern: "Batman 1 Arkham Origins" or
+            # "Tomb Raider 3 Shadow Of The Tomb Raider". Do not destructively remove
+            # numbers; generate fallbacks while preserving the exact title first.
+            bases = list(variants)
+            for base in bases:
+                m = _re.match(r'^(.+?)\s+([1-9]\d?)\s+(.+)$', base)
+                if not m:
+                    continue
+                prefix, number, suffix = m.groups()
+                # Preserve a real sequel number but restore likely subtitle punctuation.
+                _add('{} {}: {}'.format(prefix, number, suffix))
+                # Treat the number as collection ordering.
+                _add('{} {}'.format(prefix, suffix))
+                _add('{}: {}'.format(prefix, suffix))
+                _add('{} - {}'.format(prefix, suffix))
+                # Some filenames prepend both franchise + order to the actual title.
+                # Only use this as a late fallback.
+                if len(suffix.split()) >= 2:
+                    _add(suffix)
+
+            return variants
+
+        def _lookup_title(query_title):
+            encoded = quote_plus(query_title)
+            logger.debug('ScreenScraper._search_windows_shortcut() jeuInfos attempt "system+romnom" title="{}"'.format(
+                query_title))
+            url_tail = '&systemeid={}&romnom={}'.format(scraper_platform, encoded)
+            url = ScreenScraper.URL_jeuInfos + self._get_common_SS_URL() + url_tail
+            json_data = self._retrieve_URL_as_JSON(url, status_dic)
+
+            if not status_dic['status']:
+                # A 404/no-match is expected while trying variants. Keep searching.
+                status_dic['status'] = True
+                return None
+            if not isinstance(json_data, dict):
+                return None
+
+            response = json_data.get('response', {})
+            jeu_dic = response.get('jeu') if isinstance(response, dict) else None
+            if not isinstance(jeu_dic, dict):
+                return None
+
+            game_id = jeu_dic.get('id')
+            if not game_id:
+                return None
+
+            noms = jeu_dic.get('noms', [])
+            title = query_title
+            if isinstance(noms, list) and noms and isinstance(noms[0], dict):
+                title = noms[0].get('text') or title
+
+            candidate = self._new_candidate_dic()
+            candidate['id'] = str(game_id)
+            candidate['display_name'] = title
+            candidate['platform'] = platform
+            candidate['scraper_platform'] = scraper_platform
+            candidate['order'] = 1
+            return candidate, jeu_dic
+
+        def _search_variants(title):
+            variants = _make_variants(title)
+            logger.debug('ScreenScraper._search_windows_shortcut() title variants {}'.format(variants))
+            matches = []
+            seen_ids = set()
+
+            for index, query_title in enumerate(variants):
+                result = _lookup_title(query_title)
+                if not result:
+                    continue
+                candidate, jeu_dic = result
+                game_id = candidate['id']
+                if game_id in seen_ids:
+                    continue
+                seen_ids.add(game_id)
+                logger.debug('ScreenScraper._search_windows_shortcut() matched id="{}" title="{}" from query="{}"'.format(
+                    game_id, candidate['display_name'], query_title))
+                matches.append((candidate, jeu_dic))
+
+                # Exact requested-title match is high confidence; preserve the fast
+                # fully-automatic behavior that already works for most PC games.
+                if index == 0:
+                    return matches
+
+            return matches
+
+        def _choose_match(matches):
+            if not matches:
+                return None
+            if len(matches) == 1:
+                return matches[0]
+
+            # Distinct fallback variants resolved to different games. Ask rather than
+            # silently letting automatic mode choose the first uncertain result.
+            options = [item[0]['display_name'] for item in matches]
+            logger.debug('ScreenScraper._search_windows_shortcut() {} distinct fallback matches; asking user'.format(len(matches)))
+            selected = kodi.ListDialog().select(
+                title='Select ScreenScraper game for {}'.format(rombase_noext),
+                options_list=options)
+            if selected is None:
+                return None
+            return matches[selected]
+
+        logger.debug('ScreenScraper._search_windows_shortcut() production Windows title lookup')
+        logger.debug('ScreenScraper._search_windows_shortcut() requested title "{}"'.format(requested_title))
+
+        chosen = _choose_match(_search_variants(requested_title))
+
+        if chosen is None:
+            # Last resort: let the user correct/shorten the title. This also means a
+            # failed automatic PC scrape no longer has to end as an unrecoverable skip.
+            manual_title = kodi.dialog_keyboard('ScreenScraper game title', requested_title)
+            manual_title = (manual_title or '').strip()
+            if manual_title and manual_title != requested_title:
+                logger.debug('ScreenScraper._search_windows_shortcut() retrying with user-entered title "{}"'.format(manual_title))
+                chosen = _choose_match(_search_variants(manual_title))
+
+        if chosen is None:
+            logger.debug('ScreenScraper._search_windows_shortcut() no Windows title variant matched')
+            return []
+
+        candidate, jeu_dic = chosen
+        # Cache only the selected game object so metadata/assets always correspond to
+        # the game the automatic logic or user actually selected.
+        jeu_dic['roms'] = []
+        self._update_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key, jeu_dic)
+        return [candidate]
+
+    def _ensure_selected_game_cached(self, status_dic):
+        """Fetch jeuInfos by the AKL-selected ScreenScraper game ID when needed."""
+        if self._check_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key):
+            return True
+
+        if not getattr(self, 'candidate', None):
+            logger.error('ScreenScraper._ensure_selected_game_cached() No selected candidate.')
+            return False
+
+        game_id = str(self.candidate.get('id', ''))
+        if not game_id:
+            logger.error('ScreenScraper._ensure_selected_game_cached() Selected candidate has no game ID.')
+            return False
+
+        logger.debug('ScreenScraper._ensure_selected_game_cached() Fetching selected game ID "{}"'.format(game_id))
+        url_tail = '&gameid={}'.format(quote_plus(game_id))
+        url = ScreenScraper.URL_jeuInfos + self._get_common_SS_URL() + url_tail
+        json_data = self._retrieve_URL_as_JSON(url, status_dic)
+        if not status_dic['status'] or json_data is None:
+            return False
+
+        jeu_dic = json_data.get('response', {}).get('jeu')
+        if not isinstance(jeu_dic, dict):
+            logger.error('ScreenScraper._ensure_selected_game_cached() jeuInfos returned no game object.')
+            return False
+
+        # ROM data is not needed for metadata/assets and can be very large.
+        jeu_dic['roms'] = []
+        self._update_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key, jeu_dic)
+        logger.debug('ScreenScraper._ensure_selected_game_cached() Cached selected game ID "{}"'.format(game_id))
+        return True
+
     def _search_candidates_jeuInfos(self, rom_FN:io.FileName, platform, scraper_platform, status_dic):
         # --- Test data ---
         # * Example from ScreenScraper API info page.
@@ -801,8 +1130,9 @@ class ScreenScraper(Scraper):
             # Build thumb URL
             game_ID = jeu_dic['id']
             region = media_dic['region'] if 'region' in media_dic else ''
-            if region: media_type = media_dic['type'] + ' ' + region
-            else:      media_type = media_dic['type']
+            media_type = media_dic['type']
+            display_name = media_type + ' ' + region if region else media_type
+
             url_thumb_b = '?gameid={}&media={}&region={}'.format(game_ID, media_type, region)
             url_thumb_c = '&hd=0&num=&version=&maxwidth=338&maxheight=190'
             url_thumb = ScreenScraper.URL_image + url_thumb_b + url_thumb_c
@@ -822,7 +1152,7 @@ class ScreenScraper(Scraper):
             # Create asset dictionary
             asset_data = self._new_assetdata_dic()
             asset_data['asset_ID'] = asset_ID
-            asset_data['display_name'] = media_type
+            asset_data['display_name'] = display_name
             asset_data['url_thumb'] = str(url_thumb)
             asset_data['url'] = media_dic['url']
             # Special ScreenScraper field to resolve URL extension later.
@@ -1149,7 +1479,7 @@ AKL_compact_platform_Screenscraper_mapping = {
     'msdos': 135,
     'msx': 113,
     'msx2': 116,
-    'windows': 136,
+    'windows': 138,
     'xbox': 32,
     'xbox360': 33,
     'pce': 31,
@@ -1175,6 +1505,7 @@ AKL_compact_platform_Screenscraper_mapping = {
     'vb': 11,
     'wii': 16,
     'wiiu': 18,
+    'switch': 225,
     'g7400': 104,
     'scummvm': 123,
     '32x': 19,
