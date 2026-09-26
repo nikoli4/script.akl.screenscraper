@@ -29,9 +29,9 @@ from urllib.parse import quote_plus, quote
 
 # --- AKL packages ---
 from akl import constants, platforms, settings
-from akl.utils import io, net, kodi
+from akl.utils import io, net, kodi, text
 from akl.scrapers import Scraper
-from akl.api import ROMObj
+from akl.api import ROMObj, MetaDataObj
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 #   platform.
 #
 # ssuserInfos.php : Informations sur l'utilisateur ScreenScraper
-# userlevelsListe.php : Liste des niveaux utilisateurs de ScreenScraper 
+# userlevelsListe.php : Liste des niveaux utilisateurs de ScreenScraper
 # nbJoueursListe.php : Liste des nombres de joueurs
 # supportTypesListe.php : Liste des types de supports
 # romTypesListe.php : Liste des types de roms
@@ -326,11 +326,11 @@ class ScreenScraper(Scraper):
 
         # Prepare data for scraping.
         rom_FN = rom.get_scanned_data_element_as_file('file')
-        
+
         if rom_FN is None: #or rom_checksums_FN is None:
             logger.warning('Trying to scrape a non existing or virtual ROM file with Screenscraper')
             return None
-        
+
         rompath = rom_FN.getPath()
         scraper_platform = convert_AKL_platform_to_ScreenScraper(platform)
 
@@ -360,7 +360,7 @@ class ScreenScraper(Scraper):
             candidate_list = self._search_ps3_eboot(ps3_title, platform, scraper_platform, status_dic)
         else:
             candidate_list = self._search_candidates_jeuInfos(rom_FN, platform, scraper_platform, status_dic)
-        
+
         # _search_candidates_jeuRecherche() does not work for get_metadata() and get_assets()
         # because jeu_dic is not introduced in the internal cache.
         # candidate_list = self._search_candidates_jeuRecherche(
@@ -471,7 +471,7 @@ class ScreenScraper(Scraper):
 
         return json_data
 
-    # nbJoueursListe.php : Liste des nombres de joueurs 
+    # nbJoueursListe.php : Liste des nombres de joueurs
     # This function not coded at the moment.
 
     def debug_get_support_types(self, status_dic):
@@ -536,6 +536,366 @@ class ScreenScraper(Scraper):
         self._dump_json_debug('ScreenScraper_get_platform_list.json', json_data)
 
         return json_data
+
+    def get_system(self, platform_long_name, status_dic):
+        logger.debug(
+            'ScreenScraper.get_system() Platform "{}"'.format(
+                platform_long_name
+            )
+        )
+
+        screenscraper_system_id = (
+            convert_AKL_platform_to_ScreenScraper(
+                platform_long_name
+            )
+        )
+
+        if screenscraper_system_id == DEFAULT_PLAT_SCREENSCRAPER:
+            logger.error(
+                'ScreenScraper.get_system() Unsupported platform "{}".'.format(
+                    platform_long_name
+                )
+            )
+            return None
+
+        url = (
+            ScreenScraper.URL_systemesListe
+            + self._get_common_SS_URL()
+        )
+
+        json_data = self._retrieve_URL_as_JSON(
+            url,
+            status_dic
+        )
+
+        if not status_dic['status']:
+            return None
+
+        systems = json_data.get(
+            'response',
+            {}
+        ).get(
+            'systemes',
+            []
+        )
+
+        for system_dic in systems:
+            if str(system_dic.get('id')) == str(screenscraper_system_id):
+                logger.info(
+                    'ScreenScraper.get_system() Matched "{}" '
+                    'to ScreenScraper system ID {}.'.format(
+                        platform_long_name,
+                        screenscraper_system_id
+                    )
+                )
+
+                return system_dic
+
+        logger.error(
+            'ScreenScraper.get_system() ScreenScraper system ID {} '
+            'was not found for platform "{}".'.format(
+                screenscraper_system_id,
+                platform_long_name
+            )
+        )
+
+        return None
+
+    def get_system_assets(self, system_dic):
+        system_asset_mapping = {
+            'icon': constants.ASSET_ICON_ID,
+            'background': constants.ASSET_FANART_ID,
+            'screenmarquee': constants.ASSET_BANNER_ID,
+            'wheel': constants.ASSET_CLEARLOGO_ID,
+            'photo': constants.ASSET_POSTER_ID,
+            'controller': constants.ASSET_CONTROLLER_ID,
+            'video': constants.ASSET_TRAILER_ID
+        }
+
+        region_priority = [
+            'wor',
+            'us',
+            'eu'
+        ]
+
+        selected_assets = []
+
+        for media_type, asset_id in system_asset_mapping.items():
+            candidates = [
+                media
+                for media in system_dic.get('medias', [])
+                if media.get('type') == media_type
+            ]
+
+            if not candidates:
+                logger.debug(
+                    'ScreenScraper.get_system_assets() '
+                    'No "{}" media found.'.format(
+                        media_type
+                    )
+                )
+                continue
+
+            selected_media = None
+
+            # Nonregional media such as icon and video.
+            for media in candidates:
+                if not media.get('region'):
+                    selected_media = media
+                    break
+
+            # Regional media: World -> USA -> Europe.
+            if selected_media is None:
+                for region in region_priority:
+                    for media in candidates:
+                        if media.get('region') == region:
+                            selected_media = media
+                            break
+
+                    if selected_media is not None:
+                        break
+
+            # Final fallback: use the first available version.
+            if selected_media is None:
+                selected_media = candidates[0]
+
+            asset_data = self._new_assetdata_dic()
+            asset_data['asset_ID'] = asset_id
+            asset_data['display_name'] = media_type
+
+            region = selected_media.get('region', '')
+            if region:
+                asset_data['display_name'] += ' ' + region
+
+            asset_data['url'] = selected_media.get('url', '')
+            asset_data['SS_format'] = selected_media.get(
+                'format',
+                ''
+            )
+
+            selected_assets.append(asset_data)
+
+            logger.info(
+                'ScreenScraper.get_system_assets() '
+                'Selected {} -> {} ({})'.format(
+                    media_type,
+                    asset_id,
+                    region if region else 'no region'
+                )
+            )
+
+        return selected_assets
+
+    def process_system(
+            self,
+            platform_long_name,
+            system_name,
+            asset_paths,
+            progress_callback=None):
+
+        logger.info(
+            'ScreenScraper.process_system() Processing system "{}".'.format(
+                platform_long_name
+            )
+        )
+
+        status_dic = kodi.new_status_dic(
+            'ScreenScraper system scrape OK'
+        )
+
+        self.check_before_scraping(status_dic)
+
+        if not status_dic['status']:
+            return None
+
+        system_dic = self.get_system(
+            platform_long_name,
+            status_dic
+        )
+
+        if system_dic is None or not status_dic['status']:
+            return None
+
+        system_obj = MetaDataObj({
+            'assets': {}
+        })
+
+        release_year = system_dic.get('datedebut')
+        if release_year:
+            system_obj.set_releaseyear(
+                release_year
+            )
+
+        developer = system_dic.get('compagnie')
+        if developer:
+            system_obj.set_developer(
+                developer
+            )
+
+        selected_assets = self.get_system_assets(
+            system_dic
+        )
+
+        if progress_callback:
+            progress_callback(
+                0,
+                len(selected_assets),
+                None
+            )
+
+        for asset_index, selected_asset in enumerate(
+                selected_assets,
+                start=1):
+
+            asset_id = selected_asset.get(
+                'asset_ID'
+            )
+
+            if progress_callback:
+                progress_callback(
+                    asset_index,
+                    len(selected_assets),
+                    asset_id
+                )
+
+            asset_dir_FN = asset_paths.get(
+                asset_id
+            )
+
+            if asset_dir_FN is None:
+                logger.warning(
+                    'ScreenScraper.process_system() '
+                    'No destination configured for {}.'.format(
+                        asset_id
+                    )
+                )
+                continue
+
+            downloaded_asset = self.download_system_asset(
+                selected_asset,
+                system_name,
+                asset_dir_FN,
+                status_dic
+            )
+
+            if downloaded_asset is None:
+                continue
+
+            asset_path = downloaded_asset.getPath()
+
+            system_obj.set_asset(
+                asset_id,
+                asset_path
+            )
+
+        logger.info(
+            'ScreenScraper.process_system() Finished system "{}" '
+            'with {} downloaded assets.'.format(
+                platform_long_name,
+                len(system_obj.get_data_dic()['assets'])
+            )
+        )
+
+        return system_obj
+
+    def download_system_asset(
+            self,
+            selected_asset,
+            system_name,
+            asset_dir_FN,
+            status_dic):
+
+        if selected_asset is None or asset_dir_FN is None:
+            return None
+
+        asset_id = selected_asset.get('asset_ID')
+
+        logger.info(
+            'ScreenScraper.download_system_asset() '
+            'Downloading {} for "{}".'.format(
+                asset_id,
+                system_name
+            )
+        )
+
+        asset_path_noext_FN = (
+            asset_dir_FN
+            + text.str_to_filename_str(system_name)
+        )
+
+        image_url, image_url_log = self.resolve_asset_URL(
+            selected_asset,
+            status_dic
+        )
+
+        if not status_dic['status']:
+            return None
+
+        if image_url is None or not image_url:
+            logger.error(
+                'ScreenScraper.download_system_asset() '
+                'Could not resolve URL for {}.'.format(
+                    asset_id
+                )
+            )
+            return None
+
+        image_ext = self.resolve_asset_URL_extension(
+            selected_asset,
+            image_url,
+            status_dic
+        )
+
+        if not status_dic['status']:
+            return None
+
+        if image_ext is None or not image_ext:
+            logger.error(
+                'ScreenScraper.download_system_asset() '
+                'Could not resolve extension for {}.'.format(
+                    asset_id
+                )
+            )
+            return None
+
+        if image_ext == 'url':
+            return io.Url(image_url)
+
+        image_local_path = asset_path_noext_FN.append(
+            '.' + image_ext
+        )
+
+        logger.debug(
+            'ScreenScraper.download_system_asset() '
+            'Download "{}" into "{}".'.format(
+                image_url_log,
+                image_local_path.getPath()
+            )
+        )
+
+        try:
+            image_local_path = self.download_image(
+                image_url,
+                image_local_path
+            )
+        except Exception:
+            logger.exception(
+                'ScreenScraper.download_system_asset() '
+                'Failed downloading {}.'.format(
+                    asset_id
+                )
+            )
+            return None
+
+        logger.info(
+            'ScreenScraper.download_system_asset() '
+            'Downloaded {} to "{}".'.format(
+                asset_id,
+                image_local_path.getPath()
+            )
+        )
+
+        return image_local_path
 
     # Debug test function for jeuRecherche.php (game search).
     def debug_game_search(self, search_term, rombase_noext, platform, status_dic):
@@ -796,7 +1156,7 @@ class ScreenScraper(Scraper):
             options = [item[0]['display_name'] for item in matches]
             logger.debug('ScreenScraper._search_windows_shortcut() {} distinct fallback matches; asking user'.format(len(matches)))
             selected = kodi.ListDialog().select(
-                title='Select ScreenScraper game for {}'.format(rombase_noext),
+                title=kodi.translate(31000).format(rombase_noext),
                 options_list=options)
             if selected is None:
                 return None
@@ -810,7 +1170,10 @@ class ScreenScraper(Scraper):
         if chosen is None:
             # Last resort: let the user correct/shorten the title. This also means a
             # failed automatic PC scrape no longer has to end as an unrecoverable skip.
-            manual_title = kodi.dialog_keyboard('ScreenScraper game title', requested_title)
+            manual_title = kodi.dialog_keyboard(
+                kodi.translate(31001),
+                requested_title
+            )
             manual_title = (manual_title or '').strip()
             if manual_title and manual_title != requested_title:
                 logger.debug('ScreenScraper._search_windows_shortcut() retrying with user-entered title "{}"'.format(manual_title))
@@ -1064,13 +1427,13 @@ class ScreenScraper(Scraper):
             nplayers_str:str = jeu_dic['joueurs']['text']
         except KeyError:
             pass
-        
+
         if nplayers_str is None: return constants.DEFAULT_META_DEVELOPER
 
         if nplayers_str.isnumeric():
             return nplayers_str
 
-        match = re.search('\d+\\-(\d+)', nplayers_str)
+        match = re.search(r'\d+-(\d+)', nplayers_str)
         nplayers_str = match.group(1)
         return nplayers_str
 
@@ -1080,7 +1443,7 @@ class ScreenScraper(Scraper):
             for classification in jeu_dic['classifications']:
                 if classification['type'] == 'ESRB':
                     return classification['text']
-                    
+
         return constants.DEFAULT_META_ESRB
 
     def _parse_meta_plot(self, jeu_dic):
@@ -1099,65 +1462,75 @@ class ScreenScraper(Scraper):
     # It is not necessary to cache this function because all the assets can be easily
     # extracted from jeu_dic.
     #
-    # For now assets do not support region or language settings. I plan to match ROM
-    # Language and Region with ScreenScraper Language and Region soon. For example, if we
-    # are scraping a Japan ROM we must get the Japan artwork and not other region artwork.
+    # Assets are returned in region-preference order so AKL automatic scraping, which
+    # selects the first returned asset, prefers the user's configured ScreenScraper region.
+    # All candidates are still returned so manual scraping can choose any available asset.
     #
-    # Examples:
-    # https://www.screenscraper.fr/gameinfos.php?gameid=5     # Sonic 1 Megadrive
-    # https://www.screenscraper.fr/gameinfos.php?gameid=3     # Sonic 2 Megadrive
-    # https://www.screenscraper.fr/gameinfos.php?gameid=1187  # Sonic 3 Megadrive
-    # https://www.screenscraper.fr/gameinfos.php?gameid=19249 # Final Fantasy VII PSX
+    # Region priority:
+    #   1. User configured region
+    #   2. World
+    #   3. Nonregional media
+    #   4. ScreenScraper
+    #   5. Any remaining regions in their original order
     #
-    # Example of download and thumb URLs. Thumb URLs are used to display media in the website:
-    # https://www.screenscraper.fr/image.php?gameid=5&media=sstitle&hd=0&region=wor&num=&version=&maxwidth=338&maxheight=190
-    # https://www.screenscraper.fr/image.php?gameid=5&media=fanart&hd=0&region=&num=&version=&maxwidth=338&maxheight=190
-    # https://www.screenscraper.fr/image.php?gameid=5&media=steamgrid&hd=0&region=&num=&version=&maxwidth=338&maxheight=190
-    #
-    # TODO: support Manuals and Trailers.
-    # TODO: match ROM region and ScreenScraper region.
+    # TODO: In the future ROM-specific region information could override the configured
+    # ScreenScraper region for ROM sets containing games from multiple regions.
     def _retrieve_all_assets(self, jeu_dic, status_dic):
         asset_list = []
         medias_list = jeu_dic['medias']
+
         for media_dic in medias_list:
             # Find known asset types. ScreenScraper has really a lot of different assets.
             if media_dic['type'] in ScreenScraper.asset_name_mapping:
                 asset_ID = ScreenScraper.asset_name_mapping[media_dic['type']]
             else:
-                # Skip unknwon assets
+                # Skip unknown assets.
                 continue
 
-            # Build thumb URL
+            # Build thumb URL.
             game_ID = jeu_dic['id']
             region = media_dic['region'] if 'region' in media_dic else ''
             media_type = media_dic['type']
             display_name = media_type + ' ' + region if region else media_type
 
-            url_thumb_b = '?gameid={}&media={}&region={}'.format(game_ID, media_type, region)
+            url_thumb_b = '?gameid={}&media={}&region={}'.format(
+                game_ID, media_type, region)
             url_thumb_c = '&hd=0&num=&version=&maxwidth=338&maxheight=190'
             url_thumb = ScreenScraper.URL_image + url_thumb_b + url_thumb_c
 
-            # Build asset URL. ScreenScraper URLs are stripped down when saved to the cache
-            # to save space and time. FEATURE CANCELED. There could be problems reconstructing
-            # some URLs and the space saved is not so great for most games.
-            # systemeid = jeu_dic['systemeid']
-            # media = '{}({})'.format(media_type, region)
-            # url_b = '?devid={}&devpassword={}&softname={}&ssid={}&sspassword={}'.format(
-            #     base64.b64decode(self.dev_id), base64.b64decode(self.dev_pass),
-            #     self.softname, self.ssid, self.sspassword)
-            # url_c = '&systemeid={}&jeuid={}&media={}'.format(systemeid, game_ID, media)
-            # url_asset = ScreenScraper.URL_mediaJeu + url_b + url_c
-            # logger.debug('URL "{}"'.format(url_asset))
-
-            # Create asset dictionary
+            # Create asset dictionary.
             asset_data = self._new_assetdata_dic()
             asset_data['asset_ID'] = asset_ID
             asset_data['display_name'] = display_name
             asset_data['url_thumb'] = str(url_thumb)
             asset_data['url'] = media_dic['url']
+
+            # Keep the ScreenScraper region so candidates can be sorted according
+            # to the user's configured region preference.
+            asset_data['SS_region'] = region
+
             # Special ScreenScraper field to resolve URL extension later.
             asset_data['SS_format'] = media_dic['format']
             asset_list.append(asset_data)
+
+        # AKL automatic asset scraping selects index 0 from the returned candidate
+        # list. Sort candidates so the configured ScreenScraper region is preferred
+        # without removing any alternatives used by manual scraping.
+        def _asset_region_priority(asset_data):
+            region = asset_data.get('SS_region', '')
+
+            if region == self.user_region:
+                return 0
+            if region == 'wor':
+                return 1
+            if not region:
+                return 2
+            if region == 'ss':
+                return 3
+
+            return 4
+
+        asset_list.sort(key=_asset_region_priority)
 
         return asset_list
 
@@ -1167,7 +1540,7 @@ class ScreenScraper(Scraper):
     #    the file.
     # 3) Return a checksums dictionary if everything is OK. Return None in case of any error.
     def _get_SS_checksum(self, rom_checksums_FN:io.FileName):
-              
+
         f_basename = rom_checksums_FN.getBase()
         f_path = rom_checksums_FN.getPath()
         logger.debug('_get_SS_checksum() Processing "{}"'.format(f_path))
@@ -1236,10 +1609,13 @@ class ScreenScraper(Scraper):
     # Reimplementation of base class method.
     # ScreenScraper needs URL cleaning in JSON before dumping because URL have passwords.
     # Only clean data if JSON file is dumped.
+
     def _dump_json_debug(self, file_name, json_data):
-        if not self.dump_file_flag: return
-        json_data_clean = self._clean_JSON_for_dumping(json_data)
-        super(ScreenScraper, self)._dump_json_debug(file_name, json_data_clean)
+        if not self.dump_file_flag:
+            return
+
+        self._clean_JSON_for_dumping(json_data)
+        super(ScreenScraper, self)._dump_json_debug(file_name, json_data)
 
     # JSON recursive iterator generator. Keeps also track of JSON keys.
     # yield from added in Python 3.3
@@ -1379,7 +1755,7 @@ class ScreenScraper(Scraper):
         #		},         <----- Here it should be a '}' and not '},'.
         #		}
         #	}
-        #            
+        #
         logger.error('Trying to repair ScreenScraper raw data (Try 2).')
         new_page_data_raw = page_data_raw.replace('\t\t},\n\t\t}', '\t\t}\n\t\t}')
         try:
@@ -1390,10 +1766,10 @@ class ScreenScraper(Scraper):
             scraper_cache_fn = io.FileName(self.scraper_cache_dir)
             file_path = scraper_cache_fn.pjoin('ScreenScraper_url.txt')
             file_path.writeAll(url)
-            
+
             file_path = scraper_cache_fn.pjoin('ScreenScraper_page_data_raw.txt')
             file_path.writeAll(page_data_raw)
-            
+
             self._handle_exception(ex, status_dic,
                 'Error decoding JSON data from ScreenScraper (fixed version).')
             return None
@@ -1416,7 +1792,7 @@ class ScreenScraper(Scraper):
             time.sleep(ScreenScraper.TIME_WAIT_GET_ASSETS)
         # Update waiting time for next call.
         self.last_get_assets_call = datetime.now()
-        
+
 
 # ------------------------------------------------------------------------------------------------
 # Screenscraper supported platforms mapped to AKL platforms.
@@ -1426,10 +1802,10 @@ def convert_AKL_platform_to_ScreenScraper(platform_long_name):
     matching_platform = platforms.get_AKL_platform(platform_long_name)
     if matching_platform.compact_name in AKL_compact_platform_Screenscraper_mapping:
         return AKL_compact_platform_Screenscraper_mapping[matching_platform.compact_name]
-    
+
     if matching_platform.aliasof is not None and matching_platform.aliasof in AKL_compact_platform_Screenscraper_mapping:
         return AKL_compact_platform_Screenscraper_mapping[matching_platform.aliasof]
-        
+
     # Platform not found.
     return DEFAULT_PLAT_SCREENSCRAPER
 
@@ -1437,7 +1813,7 @@ def convert_Screenscraper_platform_to_AKL_platform(self, screenscraper_platform)
     if screenscraper_platform in Screenscraper_AKL_compact_platform_mapping:
         platform_compact_name = Screenscraper_AKL_compact_platform_mapping[screenscraper_platform]
         return platforms.get_AKL_platform_by_compact(platform_compact_name)
-        
+
     return platforms.get_AKL_platform_by_compact(platforms.PLATFORM_UNKNOWN_COMPACT)
 
 AKL_compact_platform_Screenscraper_mapping = {
@@ -1534,4 +1910,4 @@ AKL_compact_platform_Screenscraper_mapping = {
 
 Screenscraper_AKL_compact_platform_mapping = {}
 for key, value in AKL_compact_platform_Screenscraper_mapping.items():
-    Screenscraper_AKL_compact_platform_mapping[value] = key        
+    Screenscraper_AKL_compact_platform_mapping[value] = key

@@ -47,6 +47,17 @@ msgid "Log level"
 msgstr "settings.xml"
 
 ############################
+# User interface
+############################
+msgctxt "#31000"
+msgid "Select ScreenScraper game for {0}"
+msgstr ""
+
+msgctxt "#31001"
+msgid "ScreenScraper game title"
+msgstr ""
+
+############################
 # Enum values
 ############################
 msgctxt "#30911"

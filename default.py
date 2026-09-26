@@ -55,6 +55,8 @@ def run_plugin():
     
     if addon_args.get_command() == addons.AklAddonArguments.SCRAPE:
         run_scraper(addon_args)
+    elif addon_args.get_command() == addons.AklAddonArguments.SCRAPE_SYSTEM:
+        run_system_scraper(addon_args)
     else:
         kodi.dialog_OK(text=addon_args.get_help())
 
@@ -93,6 +95,90 @@ def run_scraper(args: addons.AklAddonArguments):
         pdialog.endProgress()
 
 
+def run_system_scraper(args: addons.AklAddonArguments):
+    logger.debug(
+        '========== run_system_scraper() BEGIN '
+        '=========================================='
+    )
+
+    settings = ScraperSettings.from_settings_dict(
+        args.get_settings()
+    )
+
+    pdialog = kodi.ProgressDialog()
+
+    screen_scraper = ScreenScraper()
+
+    scraper_strategy = ScrapeStrategy(
+        args.get_webserver_host(),
+        args.get_webserver_port(),
+        settings,
+        screen_scraper,
+        pdialog
+    )
+
+    asset_paths = {
+        asset_id: io.FileName(
+            asset_path,
+            isdir=True
+        )
+        for asset_id, asset_path
+        in args.get_asset_paths().items()
+    }
+
+    pdialog.startProgress(
+        'Retrieving system information ...',
+        100
+    )
+
+    def update_system_progress(asset_index, asset_count, asset_id):
+        if asset_count <= 0:
+            return
+
+        if asset_index == 0:
+            pdialog.updateProgress(
+                10,
+                'System information received. Preparing artwork ...'
+            )
+            return
+
+        progress = 10 + int(
+            (asset_index - 1) * 80 / asset_count
+        )
+
+        pdialog.updateProgress(
+            progress,
+            'Downloading {} ({}/{}) ...'.format(
+                asset_id,
+                asset_index,
+                asset_count
+            )
+        )
+
+    system_obj = screen_scraper.process_system(
+        args.get_platform(),
+        args.get_system_name(),
+        asset_paths,
+        progress_callback=update_system_progress
+    )
+
+    pdialog.updateProgress(
+        90,
+        'Saving system information ...'
+    )
+
+    scraper_strategy.store_scraped_system(
+        args.get_akl_addon_id(),
+        args.get_entity_id(),
+        system_obj
+    )
+
+    pdialog.endProgress()
+
+    logger.debug(
+        '========== run_system_scraper() END '
+        '============================================'
+    )
 # ---------------------------------------------------------------------------------------------
 # RUN
 # ---------------------------------------------------------------------------------------------
