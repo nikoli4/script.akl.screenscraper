@@ -1,3 +1,8 @@
+## 1.2.1
+
+- Updated the AKL module dependency to version 1.3.1.
+- Updated the release metadata to reference changelog.md.
+
 ## 1.1.16
 
 - Added Windows `.lnk` game-name scraping using ScreenScraper title searches instead of hashing shortcut files.
