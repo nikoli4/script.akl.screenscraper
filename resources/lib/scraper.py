@@ -359,13 +359,33 @@ class ScreenScraper(Scraper):
             logger.debug('ScreenScraper.get_candidates() PS3 EBOOT detected. Using parent game-folder title "{}"'.format(ps3_title))
             candidate_list = self._search_ps3_eboot(ps3_title, platform, scraper_platform, status_dic)
         else:
-            candidate_list = self._search_candidates_jeuInfos(rom_FN, platform, scraper_platform, status_dic)
+            candidate_list = self._search_candidates_jeuInfos(
+                rom_FN, platform, scraper_platform, status_dic)
 
-        # _search_candidates_jeuRecherche() does not work for get_metadata() and get_assets()
-        # because jeu_dic is not introduced in the internal cache.
-        # candidate_list = self._search_candidates_jeuRecherche(
-        #     search_term, rombase_noext, platform, scraper_platform, status_dic)
-        if not status_dic['status']: return None
+            # If the checksum/filename lookup could not identify the ROM, fall back
+            # to ScreenScraper's title-search API. The selected candidate's full
+            # jeuInfos response will be fetched later by _ensure_selected_game_cached()
+            # for metadata and assets.
+            if status_dic['status'] and not candidate_list:
+                rombase_noext = rom_FN.getBase()
+                if '.' in rombase_noext:
+                    rombase_noext = rombase_noext.rsplit('.', 1)[0]
+
+                logger.debug(
+                    'ScreenScraper.get_candidates() jeuInfos found no match. '
+                    'Falling back to name search "{}"'.format(rombase_noext)
+                )
+
+                candidate_list = self._search_candidates_jeuRecherche(
+                    search_term,
+                    rombase_noext,
+                    platform,
+                    scraper_platform,
+                    status_dic
+                )
+
+        if not status_dic['status']:
+            return None
 
         return candidate_list
 
@@ -1222,6 +1242,46 @@ class ScreenScraper(Scraper):
         logger.debug('ScreenScraper._ensure_selected_game_cached() Cached selected game ID "{}"'.format(game_id))
         return True
 
+    def _get_title_search_variants(self, title):
+        """Build conservative title variants for ScreenScraper name searches."""
+        import re as _re
+
+        variants = []
+
+        def _add(value):
+            value = _re.sub(r'\s+', ' ', value).strip()
+            if value and value not in variants:
+                variants.append(value)
+
+        # Always try the ROM filename/title exactly as supplied first.
+        _add(title)
+
+        # Normalize underscores to spaces.
+        normalized = title.replace('_', ' ')
+        _add(normalized)
+
+        # Normalize separators while keeping the wording intact.
+        no_separator = _re.sub(r'\s*[:\-]\s*', ' ', normalized)
+        _add(no_separator)
+
+        # Try likely subtitle separators at the first " The " boundary.
+        # Example:
+        # Legend Of Zelda The Wind Waker HD
+        # -> Legend Of Zelda: The Wind Waker HD
+        match = _re.search(r'\s+The\s+', no_separator, flags=_re.IGNORECASE)
+        if match:
+            left = no_separator[:match.start()].strip()
+            right = no_separator[match.start():].strip()
+
+            _add('{}: {}'.format(left, right))
+            _add('{} - {}'.format(left, right))
+
+        # Some databases include a leading article that ROM filenames omit.
+        if not _re.match(r'^(the|a|an)\s+', no_separator, flags=_re.IGNORECASE):
+            _add('The ' + no_separator)
+
+        return variants
+
     def _search_candidates_jeuInfos(self, rom_FN:io.FileName, platform, scraper_platform, status_dic):
         # --- Test data ---
         # * Example from ScreenScraper API info page.
@@ -1327,48 +1387,120 @@ class ScreenScraper(Scraper):
         return [ candidate ]
 
     # Call to ScreenScraper jeuRecherche.php.
-    # Not used at the moment, just here for research.
-    def _search_candidates_jeuRecherche(self, search_term, rombase_noext, platform, scraper_platform, status_dic):
-        # --- Actual data for scraping in AKL ---
-        logger.debug('ScreenScraper._search_candidates_jeuRecherche() Calling jeuRecherche.php...')
-        scraper_platform = convert_AKL_platform_to_ScreenScraper(platform)
+    # ScreenScraper title-search fallback used when the normal
+    # checksum/filename-based jeuInfos lookup returns no candidate.
+    def _search_candidates_jeuRecherche(
+            self, search_term, rombase_noext,
+            platform, scraper_platform, status_dic):
+
+        logger.debug(
+            'ScreenScraper._search_candidates_jeuRecherche() '
+            'Calling jeuRecherche.php...'
+        )
+
         system_id = scraper_platform
-        recherche = quote_plus(rombase_noext)
-        logger.debug('ScreenScraper._search_candidates_jeuRecherche() system_id  "{}"'.format(system_id))
-        logger.debug('ScreenScraper._search_candidates_jeuRecherche() recherche  "{}"'.format(recherche))
+        variants = self._get_title_search_variants(rombase_noext)
 
-        # --- Build URL and retrieve JSON ---
-        url_tail = '&systemeid={}&recherche={}'.format(system_id, recherche)
-        url = ScreenScraper.URL_jeuRecherche + self._get_common_SS_URL() + url_tail
-        json_data = self._retrieve_URL_as_JSON(url, status_dic)
-        if json_data is None or not status_dic['status']: return None
-        self._dump_json_debug('ScreenScraper_gameSearch.json', json_data)
+        logger.debug(
+            'ScreenScraper._search_candidates_jeuRecherche() '
+            'title variants {}'.format(variants)
+        )
 
-        # * If no games were found server replied with a HTTP 404 error. json_data is None and
-        #  status_dic signals operation succesfull. Return empty list of candidates.
-        # * If an error/exception happened then it is marked in status_dic.
-        if json_data is None: return []
-        jeu_list = json_data['response']['jeux']
-        logger.debug('Number of games {}'.format(len(jeu_list)))
-
-        # --- Build candidate_list ---
-        # cache_key = search_term + '__' + rombase_noext + '__' + platform
         candidate_list = []
-        for jeu_dic in jeu_list:
-            id_str = jeu_dic['id']
-            title = jeu_dic['noms'][0]['text']
-            candidate = self._new_candidate_dic()
-            candidate['id'] = id_str
-            candidate['display_name'] = title
-            candidate['platform'] = platform
-            candidate['scraper_platform'] = scraper_platform
-            candidate['order'] = 1
-            # candidate['SS_cache_str'] = cache_key # Special field to retrieve game from SS cache.
-            candidate_list.append(candidate)
+        seen_ids = set()
 
-        # --- Add candidate games to the internal cache ---
-        # logger.debug('ScreenScraper._search_candidates_jeuInfos() Adding to internal cache')
-        # self.cache_jeuInfos[cache_key] = jeu_dic
+        for query_title in variants:
+            recherche = quote_plus(query_title)
+
+            logger.debug(
+                'ScreenScraper._search_candidates_jeuRecherche() '
+                'system_id="{}" recherche="{}"'.format(
+                    system_id, query_title
+                )
+            )
+
+            url_tail = '&systemeid={}&recherche={}'.format(
+                system_id, recherche
+            )
+            url = (
+                ScreenScraper.URL_jeuRecherche +
+                self._get_common_SS_URL() +
+                url_tail
+            )
+
+            json_data = self._retrieve_URL_as_JSON(
+                url, status_dic
+            )
+
+            # A real API/network error should stop the fallback search.
+            # ScreenScraper 404/no-result responses already leave status
+            # successful and are handled below as an empty result.
+            if not status_dic['status']:
+                return None
+
+            if not isinstance(json_data, dict):
+                continue
+
+            response = json_data.get('response', {})
+            if not isinstance(response, dict):
+                continue
+
+            jeu_list = response.get('jeux', [])
+            if not isinstance(jeu_list, list):
+                continue
+
+            logger.debug(
+                'ScreenScraper._search_candidates_jeuRecherche() '
+                'variant "{}" returned {} result(s)'.format(
+                    query_title, len(jeu_list)
+                )
+            )
+
+            for jeu_dic in jeu_list:
+                if not isinstance(jeu_dic, dict):
+                    continue
+
+                game_id = jeu_dic.get('id')
+                if not game_id:
+                    logger.debug(
+                        'ScreenScraper._search_candidates_jeuRecherche() '
+                        'Ignoring result without game ID for "{}"'.format(
+                            query_title
+                        )
+                    )
+                    continue
+
+                game_id = str(game_id)
+
+                if game_id in seen_ids:
+                    continue
+
+                noms = jeu_dic.get('noms', [])
+                title = query_title
+
+                if (
+                    isinstance(noms, list) and
+                    noms and
+                    isinstance(noms[0], dict)
+                ):
+                    title = noms[0].get('text') or title
+
+                candidate = self._new_candidate_dic()
+                candidate['id'] = game_id
+                candidate['display_name'] = title
+                candidate['platform'] = platform
+                candidate['scraper_platform'] = scraper_platform
+                candidate['order'] = len(candidate_list) + 1
+
+                candidate_list.append(candidate)
+                seen_ids.add(game_id)
+
+        logger.debug(
+            'ScreenScraper._search_candidates_jeuRecherche() '
+            'Returning {} unique candidate(s)'.format(
+                len(candidate_list)
+            )
+        )
 
         return candidate_list
 
