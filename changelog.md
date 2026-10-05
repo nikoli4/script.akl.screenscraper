@@ -1,3 +1,15 @@
+## 1.3.0
+
+- Updated the Advanced Kodi Launcher Library Module dependency to version 1.4.0.
+- Improved ScreenScraper title-search fallback matching across supported platforms.
+- Improved Windows shortcut title matching by reusing the common ScreenScraper search variants.
+- Improved candidate handling so ambiguous Windows title matches can be handled by AKL's normal scraper selection flow.
+- Added additional conservative title variants for difficult game-name matches.
+- Improved Nintendo 3DS fallback matching for titles stored with a 3D suffix.
+- Improved scraper log privacy by preventing system artwork URLs and local artwork paths from being written to debug logs.
+- Fixed ScreenScraper credential sanitization for logged URLs.
+- Fixed the ScreenScraper password setting heading.
+
 ## 1.2.1
 
 - Updated the AKL module dependency to version 1.3.1.

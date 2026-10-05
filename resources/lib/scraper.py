@@ -887,10 +887,7 @@ class ScreenScraper(Scraper):
 
         logger.debug(
             'ScreenScraper.download_system_asset() '
-            'Download "{}" into "{}".'.format(
-                image_url_log,
-                image_local_path.getPath()
-            )
+            'Downloading {} asset.'.format(asset_id)
         )
 
         try:
@@ -1068,6 +1065,14 @@ class ScreenScraper(Scraper):
             _add(_re.sub(r'\s*-\s*', ' - ', normalized))
             _add(_re.sub(r'\s*-\s*', ' ', normalized))
 
+            # Reuse the common ScreenScraper title-search variants so Windows
+            # shortcuts benefit from the same conservative title normalization
+            # used by the general jeuRecherche fallback.
+            for common_variant in self._get_title_search_variants(
+                    normalized,
+                    platform):
+                _add(common_variant)
+
             # Parenthetical text in this collection is often an edition/DLC/note,
             # e.g. "... (The Path Home)". Keep the original first, then try without it.
             no_paren = _re.sub(r'\s*\([^()]*\)\s*$', '', normalized).strip()
@@ -1165,50 +1170,81 @@ class ScreenScraper(Scraper):
 
             return matches
 
-        def _choose_match(matches):
-            if not matches:
-                return None
-            if len(matches) == 1:
-                return matches[0]
-
-            # Distinct fallback variants resolved to different games. Ask rather than
-            # silently letting automatic mode choose the first uncertain result.
-            options = [item[0]['display_name'] for item in matches]
-            logger.debug('ScreenScraper._search_windows_shortcut() {} distinct fallback matches; asking user'.format(len(matches)))
-            selected = kodi.ListDialog().select(
-                title=kodi.translate(31000).format(rombase_noext),
-                options_list=options)
-            if selected is None:
-                return None
-            return matches[selected]
-
         logger.debug('ScreenScraper._search_windows_shortcut() production Windows title lookup')
-        logger.debug('ScreenScraper._search_windows_shortcut() requested title "{}"'.format(requested_title))
-
-        chosen = _choose_match(_search_variants(requested_title))
-
-        if chosen is None:
-            # Last resort: let the user correct/shorten the title. This also means a
-            # failed automatic PC scrape no longer has to end as an unrecoverable skip.
-            manual_title = kodi.dialog_keyboard(
-                kodi.translate(31001),
+        logger.debug(
+            'ScreenScraper._search_windows_shortcut() requested title "{}"'.format(
                 requested_title
             )
-            manual_title = (manual_title or '').strip()
-            if manual_title and manual_title != requested_title:
-                logger.debug('ScreenScraper._search_windows_shortcut() retrying with user-entered title "{}"'.format(manual_title))
-                chosen = _choose_match(_search_variants(manual_title))
+        )
 
-        if chosen is None:
-            logger.debug('ScreenScraper._search_windows_shortcut() no Windows title variant matched')
+        # First try the high-confidence jeuInfos title variants. Return every
+        # distinct match in priority order and let AKL's ScrapeStrategy decide
+        # whether to automatically select the first candidate or present the
+        # candidate list to the user.
+        matches = _search_variants(requested_title)
+
+        if matches:
+            candidate_list = []
+
+            for order, item in enumerate(matches, 1):
+                candidate, jeu_dic = item
+                candidate['order'] = order
+                candidate_list.append(candidate)
+
+            logger.debug(
+                'ScreenScraper._search_windows_shortcut() '
+                'returning {} jeuInfos candidate(s) to AKL'.format(
+                    len(candidate_list)
+                )
+            )
+
+            # If there is only one result, cache its complete jeuInfos response.
+            # For multiple candidates we must wait until AKL selects one, so that
+            # metadata/assets correspond to the selected candidate.
+            if len(matches) == 1:
+                candidate, jeu_dic = matches[0]
+                jeu_dic['roms'] = []
+                self._update_disk_cache(
+                    Scraper.CACHE_INTERNAL,
+                    self.cache_key,
+                    jeu_dic
+                )
+
+            return candidate_list
+
+        # No jeuInfos title variant matched. Use ScreenScraper's title-search API.
+        # This returns candidates only; AKL owns automatic/manual game selection.
+        logger.debug(
+            'ScreenScraper._search_windows_shortcut() '
+            'no exact title variant matched; searching jeuRecherche '
+            'for close candidates "{}"'.format(requested_title)
+        )
+
+        close_candidates = self._search_candidates_jeuRecherche(
+            search_term,
+            requested_title,
+            platform,
+            scraper_platform,
+            status_dic
+        )
+
+        if not status_dic['status']:
             return []
 
-        candidate, jeu_dic = chosen
-        # Cache only the selected game object so metadata/assets always correspond to
-        # the game the automatic logic or user actually selected.
-        jeu_dic['roms'] = []
-        self._update_disk_cache(Scraper.CACHE_INTERNAL, self.cache_key, jeu_dic)
-        return [candidate]
+        if close_candidates:
+            logger.debug(
+                'ScreenScraper._search_windows_shortcut() '
+                'returning {} jeuRecherche candidate(s) to AKL'.format(
+                    len(close_candidates)
+                )
+            )
+            return close_candidates
+
+        logger.debug(
+            'ScreenScraper._search_windows_shortcut() '
+            'no Windows title candidates found'
+        )
+        return []
 
     def _ensure_selected_game_cached(self, status_dic):
         """Fetch jeuInfos by the AKL-selected ScreenScraper game ID when needed."""
@@ -1242,7 +1278,7 @@ class ScreenScraper(Scraper):
         logger.debug('ScreenScraper._ensure_selected_game_cached() Cached selected game ID "{}"'.format(game_id))
         return True
 
-    def _get_title_search_variants(self, title):
+    def _get_title_search_variants(self, title, platform):
         """Build conservative title variants for ScreenScraper name searches."""
         import re as _re
 
@@ -1260,6 +1296,26 @@ class ScreenScraper(Scraper):
         normalized = title.replace('_', ' ')
         _add(normalized)
 
+        # Normalize ampersands and "and" because collection filenames and
+        # ScreenScraper titles commonly use different forms.
+        if '&' in normalized:
+            _add(
+                _re.sub(
+                    r'\s*&\s*',
+                    ' and ',
+                    normalized
+                )
+            )
+        elif _re.search(r'\band\b', normalized, flags=_re.IGNORECASE):
+            _add(
+                _re.sub(
+                    r'\band\b',
+                    '&',
+                    normalized,
+                    flags=_re.IGNORECASE
+                )
+            )
+
         # Normalize separators while keeping the wording intact.
         no_separator = _re.sub(r'\s*[:\-]\s*', ' ', normalized)
         _add(no_separator)
@@ -1276,9 +1332,85 @@ class ScreenScraper(Scraper):
             _add('{}: {}'.format(left, right))
             _add('{} - {}'.format(left, right))
 
-        # Some databases include a leading article that ROM filenames omit.
-        if not _re.match(r'^(the|a|an)\s+', no_separator, flags=_re.IGNORECASE):
+        # Some databases store leading articles at the end of the title
+        # (for example "The Example Game" -> "Example Game, The").
+        article_match = _re.match(
+            r'^(the|a|an)\s+(.+)$',
+            no_separator,
+            flags=_re.IGNORECASE
+        )
+
+        if article_match:
+            article = article_match.group(1)
+            remainder = article_match.group(2).strip()
+            _add('{}, {}'.format(remainder, article.title()))
+        else:
             _add('The ' + no_separator)
+            _add('{}, The'.format(no_separator))
+
+        # Some collection filenames include a Roman-numeral franchise/order
+        # marker that ScreenScraper omits from a subtitle-style database title.
+        #
+        # Example:
+        #   Grand Theft Auto IV Episodes From Liberty City
+        #       -> Grand Theft Auto Episodes From Liberty City
+        #       -> Grand Theft Auto - Episodes From Liberty City
+        #
+        # Keep the original title first and only generate these as fallbacks.
+        roman_match = _re.match(
+            r'^(.+?)\s+(II|III|IV|V|VI|VII|VIII|IX|X)\s+(.+)$',
+            no_separator,
+            flags=_re.IGNORECASE
+        )
+
+        if roman_match:
+            prefix = roman_match.group(1).strip()
+            suffix = roman_match.group(3).strip()
+
+            # Avoid generating dangerously broad variants.
+            if len(prefix.split()) >= 2 and len(suffix.split()) >= 2:
+                _add('{} {}'.format(prefix, suffix))
+                _add('{}: {}'.format(prefix, suffix))
+                _add('{} - {}'.format(prefix, suffix))
+
+        # ScreenScraper's title search sometimes works better with the
+        # distinctive subtitle than with the complete franchise title.
+        #
+        # Generate a conservative shortened form when the title contains an
+        # "of" phrase. Example:
+        #
+        #   Legend Of Zelda Majora's Mask
+        #       -> Majora's Mask
+        #
+        # Keep this late in the variant list so complete-title searches are
+        # always preferred.
+        words = no_separator.split()
+
+        for index, word in enumerate(words):
+            if word.lower() == 'of' and index > 0:
+                # Treat the word immediately following "of" as the final word
+                # of the franchise/prefix portion and try the remaining text.
+                subtitle_start = index + 2
+
+                if subtitle_start < len(words):
+                    shortened = ' '.join(words[subtitle_start:]).strip()
+
+                    # Avoid overly broad one-word searches.
+                    if len(shortened.split()) >= 2:
+                        _add(shortened)
+
+                        # Nintendo 3DS releases are sometimes stored by ScreenScraper
+                        # with a "3D" suffix that is absent from the ROM filename.
+                        if (
+                                platform == 'Nintendo 3DS' and
+                                not _re.search(
+                                    r'\b3d\b',
+                                    shortened,
+                                    flags=_re.IGNORECASE)
+                        ):
+                            _add(shortened + ' 3D')
+
+                break
 
         return variants
 
@@ -1399,7 +1531,10 @@ class ScreenScraper(Scraper):
         )
 
         system_id = scraper_platform
-        variants = self._get_title_search_variants(rombase_noext)
+        variants = self._get_title_search_variants(
+            rombase_noext,
+            platform
+        )
 
         logger.debug(
             'ScreenScraper._search_candidates_jeuRecherche() '
@@ -1723,7 +1858,7 @@ class ScreenScraper(Scraper):
         clean_url = re.sub('devid=[^&]*&', '', clean_url)
         clean_url = re.sub('devid=[^&]*$', '', clean_url)
         clean_url = re.sub('devpassword=[^&]*&', '', clean_url)
-        clean_url = re.sub('devpassword=[^$]*$', '', clean_url)
+        clean_url = re.sub('devpassword=[^&]*$', '', clean_url)
         clean_url = re.sub('softname=[^&]*&', '', clean_url)
         clean_url = re.sub('softname=[^&]*$', '', clean_url)
         clean_url = re.sub('output=[^&]*&', '', clean_url)

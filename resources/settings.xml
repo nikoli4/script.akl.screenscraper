@@ -20,7 +20,7 @@
                         <allowempty>true</allowempty>
                     </constraints>
                     <control type="edit" format="string">
-                        <heading>30101</heading>
+                        <heading>30102</heading>
                         <hidden>true</hidden>
                     </control>
                 </setting>
