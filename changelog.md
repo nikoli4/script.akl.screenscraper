@@ -1,3 +1,8 @@
+## 1.3.1
+
+- Updated icon and fanart to the AKL Revival artwork.
+- Renamed the artwork assets so Kodi refreshes cached add-on artwork.
+
 ## 1.3.0
 
 - Updated the Advanced Kodi Launcher Library Module dependency to version 1.4.0.
