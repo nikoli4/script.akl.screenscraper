@@ -13,7 +13,7 @@ import logging
 import xbmcaddon
 
 # AKL main imports
-from akl import constants, addons
+from akl import constants, settings, addons
 from akl.utils import kodilogging, io, kodi
 from akl.scrapers import ScraperSettings, ScrapeStrategy
 
@@ -57,6 +57,8 @@ def run_plugin():
         run_scraper(addon_args)
     elif addon_args.get_command() == addons.AklAddonArguments.SCRAPE_SYSTEM:
         run_system_scraper(addon_args)
+    elif addon_args.args.cmd == "update-settings":
+        update_plugin_settings()
     else:
         kodi.dialog_OK(text=addon_args.get_help())
 
@@ -159,6 +161,7 @@ def run_system_scraper(args: addons.AklAddonArguments):
         args.get_platform(),
         args.get_system_name(),
         asset_paths,
+        scraper_settings=settings,
         progress_callback=update_system_progress
     )
 
@@ -179,6 +182,33 @@ def run_system_scraper(args: addons.AklAddonArguments):
         '========== run_system_scraper() END '
         '============================================'
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# UPDATE PLUGIN
+# ---------------------------------------------------------------------------------------------
+def update_plugin_settings():
+    supported_assets = '|'.join(ScreenScraper.supported_asset_list)
+    supported_system_assets = '|'.join(
+        ScreenScraper.supported_system_asset_list
+    )
+    supported_metadata = '|'.join(ScreenScraper.supported_metadata_list)
+
+    settings.setSetting(
+        "akl.scraper.supported_assets",
+        supported_assets
+    )
+    settings.setSetting(
+        "akl.scraper.supported_system_assets",
+        supported_system_assets
+    )
+    settings.setSetting(
+        "akl.scraper.supported_metadata",
+        supported_metadata
+    )
+    kodi.notify("Updated AKL plugin settings for this addon")
+
+
 # ---------------------------------------------------------------------------------------------
 # RUN
 # ---------------------------------------------------------------------------------------------

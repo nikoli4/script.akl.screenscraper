@@ -1,3 +1,12 @@
+## 1.3.2
+
+- Updated the AKL shared module dependency to version 1.4.1.
+- Added separate system artwork capabilities for Icon, Fanart, Banner, ClearLogo, Poster, Controller, Console, and Trailer.
+- Added Console artwork scraping using ScreenScraper system illustrations.
+- Added filtering to download only selected system artwork types.
+- Added overwrite protection for existing system artwork.
+- Fixed scraper capability refresh through the update-settings command.
+
 ## 1.3.1
 
 - Updated icon and fanart to the AKL Revival artwork.

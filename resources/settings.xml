@@ -143,6 +143,10 @@
                     <level>4</level>
                     <default>fanart|banner|snap|clearlogo|boxfront|boxback|3dbox|cartridge|map|trailer</default>
                 </setting>
+                <setting id="akl.scraper.supported_system_assets" type="string" label="System assets supported by this scraper" help="">
+                    <level>4</level>
+                    <default>icon|fanart|banner|clearlogo|poster|controller|console|trailer</default>
+                </setting>
                 <setting id="akl.scraper.friendlyname" type="string" label="Scraper friendlyname" help="">
                     <level>4</level>
                     <default>Screenscraper</default>

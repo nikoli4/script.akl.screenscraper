@@ -133,6 +133,18 @@ class ScreenScraper(Scraper):
         # ASSET_MANUAL_ID,
         constants.ASSET_TRAILER_ID,
     ]
+
+    supported_system_asset_list = [
+        constants.ASSET_ICON_ID,
+        constants.ASSET_FANART_ID,
+        constants.ASSET_BANNER_ID,
+        constants.ASSET_CLEARLOGO_ID,
+        constants.ASSET_POSTER_ID,
+        constants.ASSET_CONTROLLER_ID,
+        constants.ASSET_TRAILER_ID,
+        constants.ASSET_CONSOLE_ID,
+    ]
+
     # Unsupported AKL types:
     # manuel (Manual)
     # screenmarquee (Marquee with lower aspec ratio, more squared than rectangular).
@@ -629,7 +641,8 @@ class ScreenScraper(Scraper):
             'wheel': constants.ASSET_CLEARLOGO_ID,
             'photo': constants.ASSET_POSTER_ID,
             'controller': constants.ASSET_CONTROLLER_ID,
-            'video': constants.ASSET_TRAILER_ID
+            'video': constants.ASSET_TRAILER_ID,
+            'illustration': constants.ASSET_CONSOLE_ID,
         }
 
         region_priority = [
@@ -711,6 +724,7 @@ class ScreenScraper(Scraper):
             platform_long_name,
             system_name,
             asset_paths,
+            scraper_settings=None,
             progress_callback=None):
 
         logger.info(
@@ -756,6 +770,16 @@ class ScreenScraper(Scraper):
             system_dic
         )
 
+        if scraper_settings is not None:
+            allowed_asset_ids = set(
+                scraper_settings.asset_IDs_to_scrape or []
+            )
+
+            selected_assets = [
+                asset for asset in selected_assets
+                if asset.get('asset_ID') in allowed_asset_ids
+            ]
+
         if progress_callback:
             progress_callback(
                 0,
@@ -795,7 +819,11 @@ class ScreenScraper(Scraper):
                 selected_asset,
                 system_name,
                 asset_dir_FN,
-                status_dic
+                status_dic,
+                overwrite_existing=(
+                    scraper_settings.overwrite_existing_assets
+                    if scraper_settings is not None else False
+                )
             )
 
             if downloaded_asset is None:
@@ -823,7 +851,8 @@ class ScreenScraper(Scraper):
             selected_asset,
             system_name,
             asset_dir_FN,
-            status_dic):
+            status_dic,
+            overwrite_existing=False):
 
         if selected_asset is None or asset_dir_FN is None:
             return None
@@ -884,6 +913,16 @@ class ScreenScraper(Scraper):
         image_local_path = asset_path_noext_FN.append(
             '.' + image_ext
         )
+
+        if not overwrite_existing and image_local_path.exists():
+            logger.info(
+                'ScreenScraper.download_system_asset() '
+                'Keeping existing {} artwork for "{}".'.format(
+                    asset_id,
+                    system_name
+                )
+            )
+            return image_local_path
 
         logger.debug(
             'ScreenScraper.download_system_asset() '
